@@ -1,0 +1,32 @@
+[package]
+name = "aptview"
+description = "View APT movies in an embedded Ruffle player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+apt.workspace = true
+apt-aux.workspace = true
+apt-convert.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+log.workspace = true
+
+# Ruffle is not published to crates.io, so these are pinned git dependencies.
+# `wgpu` must stay on the version ruffle_render_wgpu expects — we use its
+# re-export (`ruffle_render_wgpu::wgpu`) rather than depending on wgpu directly.
+ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", rev = "5a6ed4fca", features = [
+    "default_font",
+    "default_compatibility_rules",
+] }
+ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", rev = "5a6ed4fca" }
+ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle", rev = "5a6ed4fca" }
+winit = "0.30.13"
+# Ruffle logs through `tracing`; without a subscriber its diagnostics (and AVM
+# trace() output) are silently dropped.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Headless screenshots: off-screen render target + PNG encoding.
+futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }

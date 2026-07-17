@@ -1,0 +1,11 @@
+[package]
+name = "apt-aux"
+description = "Auxiliary (game-side) APT assets: rendering-unit geometry and texture mappings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+image = { version = "0.25", default-features = false, features = ["tga", "dds", "png", "jpeg"] }

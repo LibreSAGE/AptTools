@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/apt",
+    "crates/apt-aux",
+    "crates/apt-convert",
+    "crates/swf2apt",
+    "crates/apt2swf",
+    "crates/aptinfo",
+    "crates/aptview",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/feliwir/AptTools"
+
+[workspace.dependencies]
+apt = { path = "crates/apt" }
+apt-aux = { path = "crates/apt-aux" }
+apt-convert = { path = "crates/apt-convert" }
+swf = "0.2.2"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+byteorder = "1"
+flate2 = "1"
+log = "0.4"
+env_logger = "0.11"

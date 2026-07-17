@@ -1,0 +1,21 @@
+[package]
+name = "apt-convert"
+description = "Conversion between SWF and EA's APT format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+apt.workspace = true
+apt-aux.workspace = true
+swf.workspace = true
+flate2.workspace = true
+thiserror.workspace = true
+log.workspace = true
+spade = "2.15.1"
+image = { version = "0.25.10", default-features = false, features = ["tga", "dds", "png", "jpeg"] }
+
+[dev-dependencies]
+apt-aux.workspace = true
+flate2.workspace = true

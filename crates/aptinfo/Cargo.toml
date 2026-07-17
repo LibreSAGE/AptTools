@@ -1,0 +1,13 @@
+[package]
+name = "aptinfo"
+description = "Display meta information about APT files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+apt.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "apt2swf"
+description = "Reassemble SWF files from EA's APT format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+apt.workspace = true
+apt-aux.workspace = true
+apt-convert.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true
+log.workspace = true

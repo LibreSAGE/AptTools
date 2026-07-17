@@ -1,0 +1,12 @@
+[package]
+name = "apt"
+description = "Core library for reading and writing EA's APT file format (SWF-derived in-game UI format)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+byteorder.workspace = true
+log.workspace = true
