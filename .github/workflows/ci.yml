@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*.*.*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: Test
+        run: cargo test --release --workspace --target ${{ matrix.target }}
+
+      - name: Package binaries (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          for bin in aptinfo apt2swf swf2apt aptview; do
+            cp "target/${{ matrix.target }}/release/$bin" dist/
+          done
+          cp README.md LICENSE* dist/ 2>/dev/null || true
+          tar -C dist -czf "apttools-${{ matrix.target }}.tar.gz" .
+
+      - name: Package binaries (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          foreach ($bin in "aptinfo","apt2swf","swf2apt","aptview") {
+            Copy-Item "target/${{ matrix.target }}/release/$bin.exe" dist/
+          }
+          Copy-Item README.md dist/ -ErrorAction SilentlyContinue
+          Copy-Item LICENSE* dist/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/* -DestinationPath "apttools-${{ matrix.target }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apttools-${{ matrix.target }}
+          path: |
+            apttools-${{ matrix.target }}.tar.gz
+            apttools-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
