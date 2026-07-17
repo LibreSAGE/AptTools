@@ -9,6 +9,7 @@
 //! separate shared `JpegTables` tag) isn't handled — it's a legacy SWF1
 //! encoding not used by the C&C/BFME-era exporter this crate targets.
 
+use std::borrow::Cow;
 use std::io::Read;
 
 use apt_aux::Texture;
@@ -16,9 +17,14 @@ use flate2::read::ZlibDecoder;
 use swf::{BitmapFormat, DefineBitsJpeg3, DefineBitsLossless};
 
 /// Decode a plain JPEG (`DefineBits`/`DefineBitsJpeg2` payload).
+///
+/// SWF8+ permits `DefineBitsJPEG2/3` to actually carry PNG or GIF instead of
+/// JPEG, so we sniff the payload and fall back to `load_from_memory` when it's
+/// not JPEG.
 pub fn decode_jpeg(data: &[u8]) -> Option<Texture> {
-    let img = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
-        .or_else(|_| image::load_from_memory(data))
+    let cleaned = clean_jpeg_data(data);
+    let img = image::load_from_memory_with_format(&cleaned, image::ImageFormat::Jpeg)
+        .or_else(|_| image::load_from_memory(&cleaned))
         .inspect_err(|e| log::warn!("failed to decode embedded JPEG: {e}"))
         .ok()?;
     let rgba = img.to_rgba8();
@@ -27,6 +33,33 @@ pub fn decode_jpeg(data: &[u8]) -> Option<Texture> {
         height: rgba.height(),
         rgba: rgba.into_raw(),
     })
+}
+
+/// Strip the erroneous `FF D9 FF D8` (EOI followed by SOI) marker pair that
+/// the Flash JPEG exporter inserts into `DefineBits*` streams — once at the
+/// very start, and once between the encoding tables and the image data. A
+/// standard JPEG decoder stops at that premature EOI, so it must be removed
+/// before decoding. (This mirrors Ruffle's `remove_invalid_jpeg_data`; a
+/// mid-stream `FF D9 FF D8` never occurs in a well-formed JPEG, so removing it
+/// is always safe.)
+fn clean_jpeg_data(data: &[u8]) -> Cow<'_, [u8]> {
+    const MARKER: [u8; 4] = [0xFF, 0xD9, 0xFF, 0xD8];
+    let mut data = data;
+    let mut stripped_leading = false;
+    if data.starts_with(&MARKER) {
+        data = &data[4..];
+        stripped_leading = true;
+    }
+    match data.windows(4).position(|w| w == MARKER) {
+        None if !stripped_leading => Cow::Borrowed(data),
+        None => Cow::Owned(data.to_vec()),
+        Some(pos) => {
+            let mut out = Vec::with_capacity(data.len() - 4);
+            out.extend_from_slice(&data[..pos]);
+            out.extend_from_slice(&data[pos + 4..]);
+            Cow::Owned(out)
+        }
+    }
 }
 
 /// Decode a `DefineBitsJpeg3` tag: the JPEG payload plus its separate

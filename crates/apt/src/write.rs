@@ -340,6 +340,15 @@ impl Writer {
     }
 
     fn write_frames(&mut self, frames: &[Frame]) -> Result<u64> {
+        // A frameless movie (e.g. an empty placeholder sprite) must serialize a
+        // NULL frame pointer, not an offset into whatever bytes follow: the
+        // engine only null-checks the frame pointer before dereferencing
+        // `aFrames->nControls`/`apControls`, so a non-null pointer into unrelated
+        // data makes it walk garbage and crash (seen in AptCharacterAnimation::
+        // ResetInitIndicators at shutdown).
+        if frames.is_empty() {
+            return Ok(0);
+        }
         self.arena.align_ptr();
         let frames_off = self.arena.len() as u64;
         let mut control_array_patches = Vec::with_capacity(frames.len());
@@ -423,7 +432,12 @@ impl Writer {
                     Some(name) => self.deferred.string(&mut self.arena, name),
                     None => self.arena.ptr_value(0),
                 }
-                self.arena.i32(p.clip_depth.unwrap_or(0));
+                // APT uses nClipDepth as a signed sentinel: `>= 0` marks a
+                // clipping mask (clip up to that depth), `< 0` a normal drawn
+                // object. A non-clipping placement must therefore serialize -1,
+                // NOT 0 — writing 0 makes the engine treat every object as a
+                // mask and nothing renders to screen (AptDisplayList.cpp:1671).
+                self.arena.i32(p.clip_depth.unwrap_or(-1));
                 let actions_patch = self.arena.ptr_patch();
 
                 let mut po3_patches = None;

@@ -53,10 +53,14 @@ struct App {
     url: String,
     base_dir: PathBuf,
     title: String,
-    // The window must outlive the player: `for_window_unsafe` erases its
-    // lifetime. Holding an Arc here, declared before `player`, keeps that true.
-    window: Option<Arc<Window>>,
+    // The player's wgpu surface was created from the window with an erased
+    // lifetime (`for_window_unsafe`), so the window must outlive it — and, on
+    // shutdown, the surface must be torn down *before* the window's Wayland/X
+    // connection is. Struct fields drop in declaration order, so `player` is
+    // declared before `window` to drop first; `exiting` also drops them in this
+    // order explicitly, before winit destroys the window.
     player: Option<Arc<Mutex<Player>>>,
+    window: Option<Arc<Window>>,
     /// Drives the navigator's fetches (loading imported movies). Nothing polls
     /// these futures unless we run it, so imports would never arrive.
     executor: NullExecutor,
@@ -239,6 +243,17 @@ impl ApplicationHandler for App {
         if let Some(t) = self.next_frame_time {
             event_loop.set_control_flow(ControlFlow::WaitUntil(t));
         }
+    }
+
+    /// Tear down while the window is still alive. The player owns the wgpu
+    /// surface built from this window; dropping the window (and its Wayland/X
+    /// connection) first would make the surface's unconfigure-on-drop
+    /// dereference freed objects and segfault (in `libwayland-client`). Drop the
+    /// player first, then the window — winit only destroys the window after
+    /// `exiting` returns.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.player = None;
+        self.window = None;
     }
 }
 

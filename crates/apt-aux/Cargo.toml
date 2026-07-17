@@ -9,3 +9,4 @@ repository.workspace = true
 [dependencies]
 thiserror.workspace = true
 image = { version = "0.25", default-features = false, features = ["tga", "dds", "png", "jpeg"] }
+rectutils = "0.7.0"

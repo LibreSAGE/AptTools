@@ -13,9 +13,12 @@ use apt_aux::{ShapeGeometry, Style, Texture};
 
 use crate::assets::{Assets, TextureKey};
 use swf::{
-    BitmapFormat, CharacterId, Color, ColorTransform, Compression, DefineBitsLossless, Depth,
-    FillStyle, Fixed16, Fixed8, Header, Matrix, PlaceObjectAction, Point, PointDelta, Rectangle,
-    Shape, ShapeFlag, ShapeRecord, ShapeStyles, Sprite, StyleChangeData, SwfStr, Tag, Twips,
+    BevelFilter, BevelFilterFlags, BitmapFormat, BlendMode, BlurFilter, BlurFilterFlags,
+    CharacterId, Color, ColorMatrixFilter, ColorTransform, Compression, DefineBitsLossless, Depth,
+    DropShadowFilter, DropShadowFilterFlags, FillStyle, Filter, Fixed16, Fixed8, GlowFilter,
+    GlowFilterFlags, GradientFilter, GradientFilterFlags, GradientRecord, Header, Matrix,
+    PlaceObjectAction, Point, PointDelta, Rectangle, Shape, ShapeFlag, ShapeRecord, ShapeStyles,
+    Sprite, StyleChangeData, SwfStr, Tag, Twips,
 };
 
 use crate::bytecode::apt_to_swf_actions;
@@ -67,7 +70,7 @@ pub fn apt_to_swf_with(
     let mut shapes: Vec<Shape> = Vec::new();
     let mut sprites: Vec<(CharacterId, Vec<Frame>)> = Vec::new();
     let mut buttons: Vec<(CharacterId, &apt::Button)> = Vec::new();
-    let mut texts: Vec<(CharacterId, &apt::Text)> = Vec::new();
+    let mut texts: Vec<(CharacterId, &apt::Text, Option<&str>)> = Vec::new();
     // Bitmap characters placed directly on a timeline: (id, texture SWF id, w, h).
     let mut placed_bitmaps: Vec<(CharacterId, CharacterId, u32, u32)> = Vec::new();
     for (i, slot) in movie.characters.iter().enumerate() {
@@ -80,7 +83,22 @@ pub fn apt_to_swf_with(
                 }
                 Character::Sprite(sp) => sprites.push((i as CharacterId, sp.frames.clone())),
                 Character::Button(b) => buttons.push((i as CharacterId, b)),
-                Character::Text(t) => texts.push((i as CharacterId, t)),
+                Character::Text(t) => {
+                    // Resolve the referenced Font character's name so the field
+                    // keeps its typeface (as a device font) and point size,
+                    // instead of falling back to the default font at height 0.
+                    let font_name =
+                        movie
+                            .characters
+                            .get(t.font_id as usize)
+                            .and_then(|s| match s {
+                                CharacterSlot::Character(Character::Font(f)) => {
+                                    Some(f.name.as_str())
+                                }
+                                _ => None,
+                            });
+                    texts.push((i as CharacterId, t, font_name));
+                }
                 Character::Bitmap if placed_ids.contains(&(i as u32)) => {
                     // A Bitmap character's texture is keyed by its own index;
                     // it renders as a shape covering the image.
@@ -138,8 +156,10 @@ pub fn apt_to_swf_with(
     for &(id, texture_id, w, h) in &placed_bitmaps {
         tags.push(Tag::DefineShape(bitmap_shape(id, texture_id, w, h)));
     }
-    for (id, t) in &texts {
-        tags.push(Tag::DefineEditText(Box::new(build_edit_text(*id, t))));
+    for (id, t, font_name) in &texts {
+        tags.push(Tag::DefineEditText(Box::new(build_edit_text(
+            *id, t, *font_name,
+        ))));
     }
 
     let mut cursor = 0usize;
@@ -394,9 +414,11 @@ fn place_object_tag<'a>(p: &'a PlaceObject, handler_data: &'a [Vec<u8>]) -> Tag<
         }),
         clip_depth: p.clip_depth.map(|d| d as Depth),
         class_name: None,
-        filters: None,
+        // Per-instance filters and blend mode are PlaceObject3 data the APT
+        // carries in full; pass them through rather than dropping them.
+        filters: (!p.filters.is_empty()).then(|| p.filters.iter().map(apt_filter_to_swf).collect()),
         background_color: None,
-        blend_mode: None,
+        blend_mode: p.blend_mode.and_then(|b| BlendMode::from_u8(b as u8)),
         has_image: false,
         is_bitmap_cached: None,
         is_visible: None,
@@ -675,7 +697,11 @@ fn bitmap_shape(id: CharacterId, texture_id: CharacterId, w: u32, h: u32) -> Sha
 
 /// EditText -> DefineEditText. The device font stands in for APT's fonts
 /// (glyph outlines aren't converted), which is fine for UI text.
-fn build_edit_text(id: CharacterId, t: &apt::Text) -> swf::EditText<'_> {
+fn build_edit_text<'a>(
+    id: CharacterId,
+    t: &'a apt::Text,
+    font_name: Option<&'a str>,
+) -> swf::EditText<'a> {
     let align = match t.alignment {
         apt::TextAlignment::Right => swf::TextAlign::Right,
         apt::TextAlignment::Center => swf::TextAlign::Center,
@@ -685,8 +711,18 @@ fn build_edit_text(id: CharacterId, t: &apt::Text) -> swf::EditText<'_> {
     let mut et = swf::EditText::new()
         .with_id(id)
         .with_bounds(rect_to_swf(&t.bounds))
-        .with_default_font()
-        .with_color(Some(unpack_color(t.color)))
+        .with_color(Some(unpack_color(t.color)));
+    // Keep the field's typeface and point size: reference the font by name as a
+    // device font (no glyph outlines are stored in the APT) at the APT height.
+    // Without a name, fall back to the default font.
+    et = match font_name {
+        Some(name) => et.with_font_class(
+            SwfStr::from_utf8_str(name),
+            Twips::from_pixels(t.font_height as f64),
+        ),
+        None => et.with_default_font(),
+    };
+    et = et
         .with_layout(Some(swf::TextLayout {
             align,
             left_margin: Twips::ZERO,
@@ -923,4 +959,167 @@ fn to_swf_cxform(c: &apt::PackedCxForm) -> ColorTransform {
 fn unpack_color(c: u32) -> Color {
     let [b, g, r, a] = c.to_le_bytes();
     Color { r, g, b, a }
+}
+
+/// Convert an APT filter to its SWF equivalent. APT stores the same Flash
+/// filter fields the SWF format uses: the blur/angle/distance words are raw
+/// `Fixed16` bit patterns, `strength` a raw `Fixed8`, and the flag byte shares
+/// SWF's bit layout — so each maps across by reinterpretation.
+fn apt_filter_to_swf(f: &apt::Filter) -> Filter {
+    let f16 = |v: u32| Fixed16::from_bits(v as i32);
+    let f8 = |v: u16| Fixed8::from_bits(v as i16);
+    match f {
+        apt::Filter::DropShadow {
+            color,
+            blur_x,
+            blur_y,
+            angle,
+            distance,
+            strength,
+            flags,
+        } => Filter::DropShadowFilter(Box::new(DropShadowFilter {
+            color: unpack_color(*color),
+            blur_x: f16(*blur_x),
+            blur_y: f16(*blur_y),
+            angle: f16(*angle),
+            distance: f16(*distance),
+            strength: f8(*strength),
+            flags: DropShadowFilterFlags::from_bits_retain(*flags as u8),
+        })),
+        apt::Filter::Blur {
+            blur_x,
+            blur_y,
+            flags,
+        } => Filter::BlurFilter(Box::new(BlurFilter {
+            blur_x: f16(*blur_x),
+            blur_y: f16(*blur_y),
+            flags: BlurFilterFlags::from_bits_retain(*flags as u8),
+        })),
+        apt::Filter::Glow {
+            color,
+            blur_x,
+            blur_y,
+            strength,
+            flags,
+        } => Filter::GlowFilter(Box::new(GlowFilter {
+            color: unpack_color(*color),
+            blur_x: f16(*blur_x),
+            blur_y: f16(*blur_y),
+            strength: f8(*strength),
+            flags: GlowFilterFlags::from_bits_retain(*flags as u8),
+        })),
+        apt::Filter::Bevel {
+            highlight_color,
+            shadow_color,
+            blur_x,
+            blur_y,
+            angle,
+            distance,
+            strength,
+            flags,
+        } => Filter::BevelFilter(Box::new(BevelFilter {
+            shadow_color: unpack_color(*shadow_color),
+            highlight_color: unpack_color(*highlight_color),
+            blur_x: f16(*blur_x),
+            blur_y: f16(*blur_y),
+            angle: f16(*angle),
+            distance: f16(*distance),
+            strength: f8(*strength),
+            flags: BevelFilterFlags::from_bits_retain(*flags as u8),
+        })),
+        apt::Filter::GradientGlow {
+            is_bevel,
+            colors,
+            ratios,
+            blur_x,
+            blur_y,
+            angle,
+            distance,
+            strength,
+            flags,
+        } => {
+            let records = ratios
+                .iter()
+                .zip(colors)
+                .map(|(&ratio, &color)| GradientRecord {
+                    ratio,
+                    color: unpack_color(color),
+                })
+                .collect();
+            let grad = Box::new(GradientFilter {
+                colors: records,
+                blur_x: f16(*blur_x),
+                blur_y: f16(*blur_y),
+                angle: f16(*angle),
+                distance: f16(*distance),
+                strength: f8(*strength),
+                flags: GradientFilterFlags::from_bits_retain(*flags as u8),
+            });
+            if *is_bevel {
+                Filter::GradientBevelFilter(grad)
+            } else {
+                Filter::GradientGlowFilter(grad)
+            }
+        }
+        apt::Filter::ColorMatrix { values } => {
+            Filter::ColorMatrixFilter(Box::new(ColorMatrixFilter { matrix: *values }))
+        }
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn drop_shadow_maps_color_fixed_point_and_flags() {
+        let f = apt::Filter::DropShadow {
+            color: u32::from_le_bytes([0x11, 0x22, 0x33, 0x44]), // b, g, r, a
+            blur_x: 4u32 << 16,                                  // Fixed16 4.0
+            blur_y: 2u32 << 16,                                  // Fixed16 2.0
+            angle: 0,
+            distance: 8u32 << 16, // Fixed16 8.0
+            strength: 2u16 << 8,  // Fixed8 2.0
+            flags: 0x60,          // knockout | composite-source
+        };
+        match apt_filter_to_swf(&f) {
+            Filter::DropShadowFilter(d) => {
+                assert_eq!(
+                    d.color,
+                    Color {
+                        r: 0x33,
+                        g: 0x22,
+                        b: 0x11,
+                        a: 0x44
+                    }
+                );
+                assert_eq!(d.blur_x.to_f64(), 4.0);
+                assert_eq!(d.blur_y.to_f64(), 2.0);
+                assert_eq!(d.distance.to_f64(), 8.0);
+                assert_eq!(d.strength.to_f64(), 2.0);
+                assert_eq!(d.flags.bits(), 0x60);
+            }
+            other => panic!("expected DropShadowFilter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gradient_glow_vs_bevel_and_blend_mode() {
+        let grad = apt::Filter::GradientGlow {
+            is_bevel: true,
+            colors: vec![0, 0xFFFFFFFF],
+            ratios: vec![0, 255],
+            blur_x: 0,
+            blur_y: 0,
+            angle: 0,
+            distance: 0,
+            strength: 0,
+            flags: 0,
+        };
+        assert!(matches!(
+            apt_filter_to_swf(&grad),
+            Filter::GradientBevelFilter(_)
+        ));
+        assert_eq!(BlendMode::from_u8(8), Some(BlendMode::Add));
+    }
 }

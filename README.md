@@ -104,14 +104,19 @@ Fully working:
 Partial / not yet implemented:
 
 - **APT → SWF** produces a valid, player-loadable SWF with the timeline
-  structure, sprites, placements, and translated actions. Shape geometry is
-  rendered from the `.ru` triangle lists as **solid-filled** paths; textured
-  fills fall back to the vertex color (bitmap fills would need the original
-  textures re-embedded).
-- **SWF → APT** recovers timeline structure, sprites, shape bounds, and actions,
-  but does **not** yet triangulate SWF vector shapes into `.ru` geometry, so a
-  round-tripped movie renders without shape fills. Fonts, morph interpolation,
-  and sound payloads are not yet converted.
+  structure, sprites, placements, translated actions, per-instance blend modes
+  and filters, buttons, and dynamic text (device-font by name at the original
+  size). Shape geometry is rebuilt from the `.ru` triangle lists, with bitmap
+  fills re-embedded from the atlas (solid vertex-color fallback when no texture
+  is supplied). Not converted: embedded font glyph outlines (text uses a device
+  font), morph interpolation, and static text — the APT stores no glyph/morph
+  edge data to reconstruct these from. Sound characters carry no payload.
+- **SWF → APT** recovers timeline structure, sprites, shape bounds+`.ru`
+  geometry, bitmap-fill textures (atlas or per-image), actions, frame labels,
+  clip event handlers (`onClipEvent`/`on`), per-instance filters and blend
+  modes, and cross-movie imports. Text, button, and font characters are not yet
+  converted (placed instances become blank placeholders); morph interpolation
+  and sound payloads are not converted.
 - `Try`/`Catch` action blocks are modeled and round-trip within APT, but are not
   yet translated to SWF.
 

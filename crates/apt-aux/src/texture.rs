@@ -13,6 +13,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use rectutils::pack::RectPacker;
+
 use crate::dat::TextureMap;
 use crate::{Error, Result};
 
@@ -54,6 +56,37 @@ impl Texture {
         let data = std::fs::read(path)?;
         Texture::decode(&data, Some(path))
     }
+
+    /// Encode and write this texture to `path`; the image format is chosen from
+    /// the path's extension by the `image` crate.
+    ///
+    /// TGA is written **uncompressed** (truecolor type 2): the classic games'
+    /// texture loaders reject RLE-compressed TGA, and `image` would otherwise
+    /// default to RLE.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        if ext.as_deref() == Some("tga") {
+            use image::ImageEncoder;
+            let file = std::fs::File::create(path)?;
+            image::codecs::tga::TgaEncoder::new(std::io::BufWriter::new(file))
+                .disable_rle()
+                .write_image(
+                    &self.rgba,
+                    self.width,
+                    self.height,
+                    image::ExtendedColorType::Rgba8,
+                )
+                .map_err(|e| Error::Texture(format!("tga encode failed: {e}")))?;
+            return Ok(());
+        }
+        let img = image::RgbaImage::from_raw(self.width, self.height, self.rgba.clone())
+            .ok_or_else(|| Error::Texture("rgba buffer does not match dimensions".into()))?;
+        img.save(path)
+            .map_err(|e| Error::Texture(format!("save failed: {e}")))
+    }
 }
 
 /// Where one input texture landed inside a packed atlas.
@@ -65,19 +98,16 @@ pub struct PackedRect {
     pub height: u32,
 }
 
-/// Pack textures into one shared atlas using a shelf packer: images are
-/// placed tallest-first, left to right, wrapping to a new shelf (row) once
-/// `max_width` would be exceeded. Simple, non-optimal packing (no bin
-/// splitting/rotation), but fast and good enough for UI-sized sprite sheets.
-///
-/// Returns the atlas plus each input's placement, indexed the same as
-/// `textures` (not the tallest-first packing order).
-pub fn pack_textures(textures: &[Texture], max_width: u32) -> (Texture, Vec<PackedRect>) {
-    const PADDING: u32 = 1;
+/// 1px transparent gutter kept between packed sub-textures (and around the
+/// atlas edge) so bilinear sampling can't bleed across neighbors.
+const ATLAS_PADDING: u32 = 1;
 
-    let mut order: Vec<usize> = (0..textures.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(textures[i].height));
-
+/// Try to place every texture (each grown by [`ATLAS_PADDING`]) into a
+/// `side`x`side` page with the `rectutils` binary-tree packer. Returns each
+/// input's placement (indexed like `textures`) on success, or `None` if any
+/// texture doesn't fit.
+fn try_pack(textures: &[Texture], order: &[usize], side: u32) -> Option<Vec<PackedRect>> {
+    let mut packer = RectPacker::<u32>::new(side, side);
     let mut rects = vec![
         PackedRect {
             x: 0,
@@ -87,50 +117,84 @@ pub fn pack_textures(textures: &[Texture], max_width: u32) -> (Texture, Vec<Pack
         };
         textures.len()
     ];
-    let mut shelf_x = 0u32;
-    let mut shelf_y = 0u32;
-    let mut shelf_height = 0u32;
-    let mut atlas_width = 0u32;
-
-    for i in order {
+    for &i in order {
         let t = &textures[i];
-        let (padded_w, padded_h) = (t.width + PADDING, t.height + PADDING);
-        if shelf_x > 0 && shelf_x + padded_w > max_width {
-            shelf_y += shelf_height;
-            shelf_x = 0;
-            shelf_height = 0;
-        }
+        let free = packer.find_free(t.width + ATLAS_PADDING, t.height + ATLAS_PADDING)?;
         rects[i] = PackedRect {
-            x: shelf_x,
-            y: shelf_y,
+            x: free.position.x,
+            y: free.position.y,
             width: t.width,
             height: t.height,
         };
-        shelf_x += padded_w;
-        shelf_height = shelf_height.max(padded_h);
-        atlas_width = atlas_width.max(shelf_x);
     }
-    let atlas_height = shelf_y + shelf_height;
+    Some(rects)
+}
 
-    let mut rgba = vec![0u8; (atlas_width as usize) * (atlas_height as usize) * 4];
+/// Pack textures into one shared **square, power-of-two** atlas (512x512,
+/// 1024x1024, ...) using the `rectutils` packer. Tries the smallest square
+/// power-of-two that could hold the content and doubles until everything fits.
+///
+/// Returns `None` if the textures don't fit within a `max_side`x`max_side`
+/// square — the caller should then skip packing and export each texture
+/// standalone.
+///
+/// On success, returns the atlas plus each input's placement, indexed the same
+/// as `textures` (largest are placed first internally for a tighter fit).
+pub fn pack_textures(textures: &[Texture], max_side: u32) -> Option<(Texture, Vec<PackedRect>)> {
+    if textures.is_empty() {
+        return None;
+    }
+
+    // Largest first: the packer fills better when big rectangles are placed
+    // while the page is still mostly empty.
+    let mut order: Vec<usize> = (0..textures.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(textures[i].width * textures[i].height));
+
+    // Smallest square power-of-two that could conceivably hold the content: it
+    // must fit the largest single (padded) side and have enough total area.
+    let min_side = textures
+        .iter()
+        .map(|t| t.width.max(t.height) + ATLAS_PADDING)
+        .max()
+        .unwrap_or(1);
+    let total_area: u64 = textures
+        .iter()
+        .map(|t| (t.width + ATLAS_PADDING) as u64 * (t.height + ATLAS_PADDING) as u64)
+        .sum();
+    let mut side = 1u32;
+    while side < min_side || (side as u64) * (side as u64) < total_area {
+        side <<= 1;
+    }
+
+    let rects = loop {
+        if side > max_side {
+            return None;
+        }
+        if let Some(rects) = try_pack(textures, &order, side) {
+            break rects;
+        }
+        side <<= 1;
+    };
+
+    let mut rgba = vec![0u8; (side as usize) * (side as usize) * 4];
     for (i, t) in textures.iter().enumerate() {
         let r = rects[i];
         for y in 0..t.height {
             let src_start = (y * t.width * 4) as usize;
             let src = &t.rgba[src_start..src_start + (t.width * 4) as usize];
             let dst_row = r.y + y;
-            let dst_start = ((dst_row * atlas_width + r.x) * 4) as usize;
+            let dst_start = ((dst_row * side + r.x) * 4) as usize;
             rgba[dst_start..dst_start + (t.width * 4) as usize].copy_from_slice(src);
         }
     }
-    (
+    Some((
         Texture {
-            width: atlas_width,
-            height: atlas_height,
+            width: side,
+            height: side,
             rgba,
         },
         rects,
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -156,8 +220,11 @@ mod pack_tests {
             solid(3, 6, [0, 255, 0, 255]),
             solid(5, 2, [0, 0, 255, 255]),
         ];
-        let (atlas, rects) = pack_textures(&textures, 8);
+        let (atlas, rects) = pack_textures(&textures, 64).expect("must fit in 64x64");
         assert_eq!(rects.len(), 3);
+        // Square power-of-two atlas.
+        assert_eq!(atlas.width, atlas.height);
+        assert!(atlas.width.is_power_of_two());
 
         // Every rect's placed pixels must match its source texture exactly,
         // and rects (with 1px padding) must not overlap each other.

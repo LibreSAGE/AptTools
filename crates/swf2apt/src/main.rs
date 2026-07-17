@@ -9,8 +9,30 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use apt::write::WriteOptions;
 use apt::PtrSize;
+use apt_aux::ru::RuFormat;
+use apt_aux::GeometryFormat;
 use apt_convert::from_swf::SwfToAptOptions;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+/// Image container for the exported textures. TGA is the classic games'
+/// native format (and the only one the reference viewers load); PNG/DDS are
+/// offered for tooling that prefers them.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum TextureFormat {
+    Tga,
+    Png,
+    Dds,
+}
+
+impl TextureFormat {
+    fn ext(self) -> &'static str {
+        match self {
+            TextureFormat::Tga => "tga",
+            TextureFormat::Png => "png",
+            TextureFormat::Dds => "dds",
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -34,6 +56,20 @@ struct Cli {
     /// Generate the decoupled-rendering variant of the format.
     #[arg(long)]
     decouple: bool,
+
+    /// Skip exporting the auxiliary assets (shape geometry `.ru` files, the
+    /// `.dat` texture map, and the exported textures).
+    #[arg(long)]
+    no_aux: bool,
+
+    /// Export each bitmap fill as its own standalone texture instead of packing
+    /// them all into one shared atlas.
+    #[arg(long)]
+    no_pack_textures: bool,
+
+    /// Container format for the exported textures.
+    #[arg(long, value_enum, default_value_t = TextureFormat::Tga)]
+    texture_format: TextureFormat,
 }
 
 fn main() -> Result<()> {
@@ -60,7 +96,12 @@ fn main() -> Result<()> {
     let opts = WriteOptions::new(ptr_size, cli.decouple, file.header.swf_version);
     let (apt_bytes, const_bytes) = file.write(&opts).context("serializing APT")?;
 
-    let base = cli.output.unwrap_or_else(|| apt::base_path(&cli.input));
+    // Strip any extension so the `<base>_geometry` / `<base>_textures` aux
+    // directories are named from the bare movie name, not `<name>.swf_...`.
+    let base = cli
+        .output
+        .unwrap_or_else(|| apt::base_path(&cli.input))
+        .with_extension("");
     let apt_path = base.with_extension("apt");
     let const_path = base.with_extension("const");
     std::fs::write(&apt_path, &apt_bytes)
@@ -79,6 +120,66 @@ fn main() -> Result<()> {
         file.movie.characters.len(),
         file.movie.frames.len(),
     );
-    log::warn!("shape geometry (.ru) and textures are not yet extracted from SWF; the APT will render without shape fills");
+    if cli.no_aux {
+        return Ok(());
+    }
+
+    // Export the game-side aux assets that live outside the `.apt` blob:
+    //   <base>_geometry/<index>.ru            shape geometry
+    //   <base>.dat                            bitmap-char -> texture-id map
+    //   <dir>/art/Textures/apt_<name>_<id>.*  exported textures (the path and
+    //                                         naming the reference viewers load)
+    let assets = apt_convert::from_swf::extract_geometry(&swf_data, !cli.no_pack_textures)
+        .context("extracting aux assets")?;
+
+    let ru = RuFormat;
+    for (&shape_index, geometry) in &assets.geometry {
+        ru.store(&base, shape_index, geometry)
+            .with_context(|| format!("writing geometry for shape {shape_index}"))?;
+    }
+
+    if !assets.texture_map.entries.is_empty() {
+        let dat_path = base.with_extension("dat");
+        std::fs::write(&dat_path, assets.texture_map.serialize())
+            .with_context(|| format!("writing {}", dat_path.display()))?;
+    }
+
+    if !assets.textures.is_empty() {
+        let name = base
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("apt")
+            .to_string();
+        let tex_dir = base
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("art/Textures");
+        std::fs::create_dir_all(&tex_dir)
+            .with_context(|| format!("creating {}", tex_dir.display()))?;
+        let ext = cli.texture_format.ext();
+        for (&tex_id, tex) in &assets.textures {
+            let tex_path = tex_dir.join(format!("apt_{name}_{tex_id}.{ext}"));
+            tex.save(&tex_path)
+                .with_context(|| format!("writing {}", tex_path.display()))?;
+        }
+        log::info!(
+            "wrote aux assets: {} shape(s), {} texture(s) ({}, {}) under {}",
+            assets.geometry.len(),
+            assets.textures.len(),
+            if cli.no_pack_textures {
+                "unpacked"
+            } else {
+                "packed atlas"
+            },
+            ext,
+            tex_dir.display(),
+        );
+    } else {
+        log::info!(
+            "wrote aux assets: {} shape(s), no bitmap fills",
+            assets.geometry.len()
+        );
+    }
+
     Ok(())
 }
