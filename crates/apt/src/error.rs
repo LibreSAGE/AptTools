@@ -1,9 +1,23 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("reading {}: {source}", path.display())]
+    ReadFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("parsing APT movie {}: {source}", base.display())]
+    Parse {
+        base: PathBuf,
+        source: Box<Error>,
+    },
 
     #[error("not an APT file: bad header tag")]
     BadAptTag,
