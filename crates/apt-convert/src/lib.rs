@@ -25,6 +25,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("apt error: {0}")]
     Apt(#[from] apt::Error),
+    #[error("loading APT movie {}: {source}", base.display())]
+    LoadMovie { base: PathBuf, source: apt::Error },
     #[error("apt-aux error: {0}")]
     Aux(String),
     #[error("swf read error: {0}")]
@@ -92,7 +94,10 @@ pub struct ConvertedMovie {
 /// those too.
 pub fn convert_movie(base: &Path, options: &ConvertOptions) -> Result<Vec<u8>> {
     let base = apt::base_path(base);
-    let file = apt::AptFile::load(&base)?;
+    let file = apt::AptFile::load(&base).map_err(|source| Error::LoadMovie {
+        base: base.clone(),
+        source,
+    })?;
     convert_loaded_movie(&base, &file, options)
 }
 
@@ -135,7 +140,10 @@ pub fn convert_movie_with_imports(
             Some(n) if seen.insert(n.to_string()) => n.to_string(),
             _ => continue, // unnamed, or already converted
         };
-        let file = apt::AptFile::load(&base)?;
+        let file = apt::AptFile::load(&base).map_err(|source| Error::LoadMovie {
+            base: base.clone(),
+            source,
+        })?;
         if !options.inline_imports {
             for import in &file.movie.imports {
                 if !seen.contains(&import.movie) {

@@ -52,9 +52,20 @@ impl AptFile {
     /// Load from `<base>.apt` + `<base>.const`. `path` may be either file or the base name.
     pub fn load(path: &Path) -> Result<AptFile> {
         let base = base_path(path);
-        let apt_data = std::fs::read(base.with_extension("apt"))?;
-        let const_data = std::fs::read(base.with_extension("const"))?;
-        Self::read(&apt_data, &const_data)
+        let apt_path = base.with_extension("apt");
+        let const_path = base.with_extension("const");
+        let apt_data = std::fs::read(&apt_path).map_err(|source| Error::ReadFile {
+            path: apt_path,
+            source,
+        })?;
+        let const_data = std::fs::read(&const_path).map_err(|source| Error::ReadFile {
+            path: const_path,
+            source,
+        })?;
+        Self::read(&apt_data, &const_data).map_err(|source| Error::Parse {
+            base,
+            source: Box::new(source),
+        })
     }
 }
 
